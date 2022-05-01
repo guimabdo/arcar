@@ -1,0 +1,232 @@
+﻿@page "/"
+@using CsvHelper
+@using CsvHelper.Configuration
+@using System.Text
+@using System.Text.RegularExpressions
+@using System.ComponentModel.DataAnnotations
+@using System.Reflection
+@using System.Globalization
+@using iText.Kernel.Pdf
+@using iText.Kernel.Pdf.Canvas.Parser
+@using iText.Kernel.Pdf.Canvas.Parser.Listener
+@inject IJSRuntime _jsRuntime;
+<PageTitle>ARCAR</PageTitle>
+<h1>Bem vindo ARCAR!</h1>
+<InputFile accept=".csv" OnChange="@ReadFiles"></InputFile>
+<InputFile accept=".pdf" OnChange="@ReadPdfFiles"></InputFile>
+<div class="overflow-auto">
+    <MBDataTable Items="Registros">
+        <TableHeader>
+            <th class="mdc-data-table__header-cell" role="columnheader" scope="col">Tipo</th>
+            <th class="mdc-data-table__header-cell" role="columnheader" scope="col">Descrição</th>
+        </TableHeader>
+        <TableRow>
+            <td class="mdc-data-table__cell">@context.Tipo</td>
+            <td class="mdc-data-table__cell">@context.Descrição</td>
+            @*<td class="mdc-data-table__cell mdc-data-table__cell--numeric">@item.Price.ToString("C2")</td>*@
+        </TableRow>
+    </MBDataTable>
+</div>
+<table>
+    <thead>
+        <tr>
+            <th>Compra ou venda</th>
+            <th>Tipo de mercado</th>
+            <th>Título</th>
+            <th>Observação</th>
+            <th>Quantidade</th>
+            <th>Valor unitário</th>
+            <th>Valor total</th>
+        </tr>
+    </thead>
+    <tbody>
+        @foreach (NegociacaoModel negociacao in Negociacoes)
+        {
+            <tr>
+                <td>@negociacao.CompraOuVenda</td>
+                <td>@negociacao.TipoDeMercado</td>
+                <td>@negociacao.Titulo</td>
+                <td>@negociacao.Observacao</td>
+                <td>@negociacao.Quantidade</td>
+                <td>@negociacao.ValorUnitario</td>
+                <td>@negociacao.ValorTotal</td>
+            </tr>
+        }
+    </tbody>
+</table>
+@if (Resumo != null)
+{
+    <table>
+        <tbody>
+        </tbody>
+    </table>
+}
+@foreach (string texto in Textos)
+{
+    <div style="white-space:pre-wrap">
+        @texto
+    </div>
+}
+@Resumo
+@code {
+    List<Registro> Registros { get; } = new();
+    List<string> Textos { get; } = new();
+    List<NegociacaoModel> Negociacoes { get; } = new();
+    ResumoModel? Resumo;
+    async Task ReadFiles(InputFileChangeEventArgs args)
+    {
+        await using var stream = args.File.OpenReadStream();
+        using TextReader textReader = new StreamReader(stream, Encoding.GetEncoding("ISO-8859-1"));
+        var csvConfiguration = new CsvConfiguration(new CultureInfo("pt-BR")) { Delimiter = ";" };
+        using var csvReader = new CsvReader(textReader, csvConfiguration);
+        await csvReader.ReadAsync();
+        await csvReader.ReadAsync();
+        csvReader.ReadHeader();
+        var key = 0;
+        while (await csvReader.ReadAsync())
+        {
+            Registros.Add(
+                new Registro(
+                    Key: key++,
+                    csvReader.GetField<string>("TIPO DE INVESTIMENTO"),
+                    csvReader.GetField<string>("DESCRIÇÃO")
+                )
+            );
+        }
+
+    }
+
+    async Task ReadPdfFiles(InputFileChangeEventArgs args)
+    {
+        Textos.Clear();
+        Negociacoes.Clear();
+        Resumo = null;
+
+        await using var stream = args.File.OpenReadStream();
+        var memoryStream = new MemoryStream();
+        await stream.CopyToAsync(memoryStream);
+        memoryStream.Position = 0;
+        using var pdfDocument = new PdfDocument(new PdfReader(memoryStream));
+        int numberOfPages = pdfDocument.GetNumberOfPages();
+        var sb = new StringBuilder();
+        for (int i = 1; i <= numberOfPages; ++i)
+        {
+            PdfPage page = pdfDocument.GetPage(i);
+            var strategy = new SimpleTextExtractionStrategy();
+            string text = PdfTextExtractor.GetTextFromPage(page, strategy);
+            //Textos.Add(text);
+            sb.Append(text);
+        }
+        pdfDocument.Close();
+
+        string[] lines = sb.ToString().ReplaceLineEndings().Split(Environment.NewLine);
+        var regexNegociacao = new Regex(@"BOVESPA\s(?<CompraOuVenda>[CV])\s(?<TipoDeMercado>[A-Z]+)\s(?<Titulo>[\w\s]+?)(\s|(?<Observacao>[D\#]{1})\s)(?<Quantidade>\d+)\s(?<ValorUnitario>[\d\.]+,\d{2})\s(?<ValorTotal>[\d\.]+,\d{2})\s");
+        var regexDataValue = new Regex(@"\s*(?<Data>.+?)\s(?<Value>[\-\.\d]+,\d{2})");
+        Resumo = new ResumoModel();
+        PropertyInfo[] properties = Resumo.GetType().GetProperties();
+        foreach (string line in lines)
+        {
+            if (line.StartsWith("BOVESPA "))
+            {
+                var match = regexNegociacao.Match(line);
+                Negociacoes.Add(new NegociacaoModel(
+                  match.Groups["CompraOuVenda"].Value,
+                  match.Groups["TipoDeMercado"].Value,
+                  match.Groups["Titulo"].Value,
+                  match.Groups["Observacao"].Value,
+                  match.Groups["Quantidade"].Value,
+                  match.Groups["ValorUnitario"].Value,
+                  match.Groups["ValorTotal"].Value
+              ));
+            }else if(regexDataValue.Match(line) is Match match)
+            {
+                string data = match.Groups["Data"].Value;
+                string value = match.Groups["Value"].Value;
+                //Textos.Add(data + value);
+                data = data
+                    .Replace("-", "")
+                    .Replace(" ", "")
+                    .Replace("/", "")
+                    .Replace(".", "")
+                    .Replace("(", "")
+                    .Replace(")", "")
+                    .Trim()
+                    .ToLower();
+                if(properties.FirstOrDefault(prop => data.StartsWith(prop.Name.ToLower())) is PropertyInfo propertyInfo)
+                {
+                    propertyInfo.SetValue(Resumo, decimal.Parse(value, new CultureInfo("pt-BR")));
+                }
+            }
+        }
+    }
+
+    record NegociacaoModel(
+        string CompraOuVenda,
+        string TipoDeMercado,
+        string Titulo,
+        string Observacao,
+        string Quantidade,
+        string ValorUnitario,
+        string ValorTotal
+    );
+
+    record ResumoModel()
+    {
+        public decimal? Debêntures { get; set; }
+        public decimal? VendasÀVista { get; set; }
+        public decimal? ComprasÀVista { get; set; }
+        public decimal? OpçõesCompras { get; set; }
+        public decimal? OpçõesVendas { get; set; }
+        public decimal? OperaçõesATermo { get; set; }
+        public decimal? ValorDasOperaçõesComTítulosPúblicos { get; set; }
+        public decimal? ValorDasOperações { get; set; }
+        public decimal? ValorLíquidoDasOperações { get; set; }
+        public decimal? TaxaDeLiquidação { get; set; }
+        public decimal? TaxaDeRegistro { get; set; }
+        public decimal? TotalClearing { get; set; }
+        public decimal? TaxaDeTermoOpções { get; set; }
+        public decimal? TaxaAna { get; set; }
+        public decimal? Emolumentos { get; set; }
+        public decimal? TotalBolsa { get; set; }
+        public decimal? Corretagem { get; set; }
+        public decimal? IssSãoPaulo { get; set; }
+        public decimal? IrrfSOperaçõesBase { get; set; }
+        public decimal? Outras { get; set; }
+        public decimal? TotalCorretagemDespesas { get; set; }
+    }
+
+
+    //record ResumoModel(
+    //    string Debentures,
+    //    string VendasAVista,
+    //    string ComprasAVista,
+    //    string OpcoesCompras,
+    //    string OpcoesVendas,
+    //    string OperacoesATermo,
+    //    string ValorDasOperacoesComTitulosPublicos,
+    //    string ValorDasOperacoes,
+    //    string EspecificacoesDiversas,
+    //    string ValorLiquidoDasOperacoes,
+    //    string TaxaDeLiquidacao,
+    //    string TaxaDeRegistro,
+    //    string TotalClearing,
+    //    string TaxaDeTermoOpcoes,
+    //    string TaxaAna,
+    //    string Emolumentos,
+    //    string TotalBolsa,
+    //    string Corretagem,
+    //    string Iss,
+    //    string IrrfBase,
+    //    string IrrfValor,
+    //    string Outras,
+    //    string TotalCorretagemDespesas,
+    //    string LiquidoParaData,
+    //    string LiquidoParaValor
+    //);
+
+    record Registro(
+        int Key,
+        string Tipo,
+        string Descrição
+    );
+}
